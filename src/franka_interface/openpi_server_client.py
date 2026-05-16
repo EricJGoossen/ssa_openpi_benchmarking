@@ -2,6 +2,7 @@ import rospy
 from openpi_client import websocket_client_policy
 from franka_client import FrankaRobotClient
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+import pyzed.sl as sl
 import numpy as np
 
 HORIZON_LENGTHS = {
@@ -35,7 +36,33 @@ class OpenPiServerClient:
             )
         print("Connected.")
 
+        # Set up ZED camera streams
+        self.exterior_zed = self.open_zed_stream(30000)
+        self.wrist_zed = self.open_zed_stream(30002)
+
         self.rate = rospy.Rate(UPDATE_RATE)
+
+    # ------------------------------------------------------------------
+    # Camera setup
+    # ------------------------------------------------------------------
+
+    def open_zed_stream(self, port):
+        """Initialize a ZED camera stream on the given port and return the camera object."""
+        zed = sl.Camera()
+        init_params = sl.InitParameters()
+        init_params.set_from_stream('127.0.0.1', port)
+        init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE
+        err = zed.open(init_params)
+        if err != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"Failed to open ZED stream on port {port}: {err}")
+        return zed
+
+    def close_zed_streams(self):
+        """Close both ZED camera streams."""
+        if hasattr(self, 'exterior_zed'):
+            self.exterior_zed.close()
+        if hasattr(self, 'wrist_zed'):
+            self.wrist_zed.close()
         
 
     # ------------------------------------------------------------------
@@ -43,11 +70,19 @@ class OpenPiServerClient:
     # ------------------------------------------------------------------
 
     def get_images(self):
-        """
-        Returns (exterior_image, wrist_image) as numpy arrays (H, W, 3) uint8.
-        TODO: implement agentlace camera client connection.
-        """
-        raise NotImplementedError("Camera client not yet implemented")
+        """Grab the latest images from both ZED cameras and return as numpy arrays."""
+        exterior_mat = sl.Mat()
+        wrist_mat = sl.Mat()
+
+        if self.exterior_zed.grab() != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError("Failed to grab frame from exterior camera")
+        if self.wrist_zed.grab() != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError("Failed to grab frame from wrist camera")
+
+        self.exterior_zed.retrieve_image(exterior_mat, sl.VIEW.LEFT)
+        self.wrist_zed.retrieve_image(wrist_mat, sl.VIEW.LEFT)
+
+        return exterior_mat.get_data()[:, :, :3], wrist_mat.get_data()[:, :, :3]
 
     def get_joint_positions(self):
         """Returns joint positions as a numpy array of shape (7,)."""
@@ -154,6 +189,8 @@ class OpenPiServerClient:
         except Exception as e:
             print(f"\nUnexpected error during policy execution: {e}")
             raise
+        finally:
+            self.close_zed_streams()
 
     def main(self, prompt, num_cycles=None):
         print(f"Running policy with prompt: '{prompt}'")
